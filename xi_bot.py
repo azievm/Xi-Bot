@@ -8,20 +8,28 @@ import asyncio
 import sqlite3
 import logging
 import os
-import time
-from typing import Dict, List, Optional, Set
-from datetime import datetime
+import sys
+import sqlite3
+import asyncio
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Any, Set
 import aiohttp
-import json
-
 from web3 import Web3
-from web3.contract import Contract
 from web3.exceptions import ContractLogicError
-
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
+
+# Alchemy SDK imports
+try:
+    from alchemy_sdk import Alchemy, Network, AlchemySettings
+except ImportError:
+    print("Warning: Alchemy SDK not installed. Run: pip install alchemy-sdk")
+    Alchemy = None
+    Network = None
+    AlchemySettings = None
 
 # Configure logging
 logging.basicConfig(
@@ -177,30 +185,34 @@ class TransactionMonitor:
     """Monitors Ethereum blockchain for new transactions and balance queries"""
 
     def __init__(self, web3_provider_url: str):
-        self.web3_provider_url = web3_provider_url
+        """Initialize the transaction monitor"""
+        self.web3 = Web3(Web3.HTTPProvider(web3_provider_url))
+        # Start from recent blocks instead of genesis
+        current_block = self.web3.eth.block_number
+        self.last_checked_block = max(0, current_block - 100)  # Start from last 100 blocks
         
-        # Добавляем повторные попытки подключения
-        max_retries = 3
-        for attempt in range(max_retries):
+        # Initialize Alchemy SDK if available
+        self.alchemy = None
+        if Alchemy and "alchemy.com" in web3_provider_url:
             try:
-                self.web3 = Web3(Web3.HTTPProvider(web3_provider_url, request_kwargs={'timeout': 30}))
-                
-                if not self.web3.is_connected():
-                    raise Exception("Failed to connect to Ethereum node")
-                
-                # Тестируем подключение
-                current_block = self.web3.eth.block_number
-                logger.info(f"✅ Successfully connected to Ethereum node. Current block: {current_block}")
-                logger.info(f"✅ Web3 provider: {web3_provider_url}")
-                
-                self.last_checked_block = current_block
-                break
+                # Extract API key from URL
+                api_key = web3_provider_url.split("/v2/")[-1] if "/v2/" in web3_provider_url else None
+                if api_key:
+                    settings = AlchemySettings(
+                        api_key=api_key,
+                        network=Network.ETH_MAINNET
+                    )
+                    self.alchemy = Alchemy(settings)
+                    logger.info("Alchemy SDK initialized successfully")
                 
             except Exception as e:
-                logger.error(f"❌ Connection attempt {attempt + 1} failed: {e}")
-                if attempt == max_retries - 1:
-                    raise Exception(f"Failed to connect to Ethereum node after {max_retries} attempts: {e}")
-                time.sleep(2)  # Wait before retrying
+                logger.warning(f"Failed to initialize Alchemy SDK: {e}")
+        
+        # Test connection
+        if not self.web3.is_connected():
+            raise Exception(f"Failed to connect to Ethereum node at {web3_provider_url}")
+        
+        logger.info(f"Connected to Ethereum network. Latest block: {self.web3.eth.block_number}")
 
     def is_valid_address(self, address: str) -> bool:
         """Check if an Ethereum address is valid"""
@@ -418,121 +430,86 @@ class TransactionMonitor:
                 continue
     
     async def _scan_tokens_via_alchemy(self, wallet_address: str, balance_data: Dict):
-        """Use Alchemy API to get all ERC20 tokens for an address"""
+        """Use Alchemy SDK to get all ERC20 tokens for an address"""
         try:
-            # Extract Alchemy API key from Web3 provider URL
-            web3_url = os.getenv("WEB3_PROVIDER_URL", "")
-            if "alchemy.com" not in web3_url:
-                raise Exception("Alchemy provider not configured")
+            if not self.alchemy:
+                raise Exception("Alchemy SDK not initialized")
             
-            # Extract API key from URL
-            api_key = web3_url.split("/v2/")[-1] if "/v2/" in web3_url else None
-            if not api_key:
-                raise Exception("Could not extract Alchemy API key")
+            logger.info(f"Using Alchemy SDK to discover all tokens for {wallet_address}")
             
-            logger.info(f"Using Alchemy API to discover all tokens for {wallet_address}")
+            # Use Alchemy SDK's getTokenBalances method
+            token_balances_response = await asyncio.to_thread(
+                self.alchemy.core.get_token_balances,
+                wallet_address,
+                "erc20"  # Get all ERC20 tokens
+            )
             
-            # Use Alchemy's getTokenBalances method with "erc20" to get ALL tokens
-            async with aiohttp.ClientSession() as session:
-                url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
-                payload = {
-                    "jsonrpc": "2.0",
-                    "method": "alchemy_getTokenBalances",
-                    "params": [wallet_address, "erc20"],  # "erc20" gets all ERC20 tokens
-                    "id": 42
-                }
-                
-                async with session.post(url, json=payload, timeout=30) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        
-                        if "error" in data:
-                            raise Exception(f"Alchemy API error: {data['error']}")
-                        
-                        if "result" in data and "tokenBalances" in data["result"]:
-                            token_balances = data["result"]["tokenBalances"]
-                            logger.info(f"Alchemy discovered {len(token_balances)} token contracts")
-                            
-                            # Process each token found by Alchemy
-                            for token_info in token_balances:
-                                try:
-                                    contract_address = token_info["contractAddress"]
-                                    balance_hex = token_info["tokenBalance"]
-                                    
-                                    # Skip if balance is 0 or null
-                                    if not balance_hex or balance_hex in ["0x0", "0x", "0x00"]:
-                                        continue
-                                    
-                                    # Convert hex balance to decimal
-                                    try:
-                                        balance_wei = int(balance_hex, 16)
-                                        if balance_wei == 0:
-                                            continue
-                                    except ValueError:
-                                        logger.debug(f"Invalid balance hex for {contract_address}: {balance_hex}")
-                                        continue
-                                    
-                                    # Get token metadata using Alchemy's getTokenMetadata
-                                    token_metadata = await self._get_alchemy_token_metadata(session, api_key, contract_address)
-                                    if not token_metadata:
-                                        continue
-                                    
-                                    # Calculate actual balance using decimals
-                                    decimals = token_metadata.get('decimals', 18)
-                                    actual_balance = balance_wei / (10 ** decimals)
-                                    
-                                    if actual_balance <= 0:
-                                        continue
-                                    
-                                    # Create token data structure
-                                    token_data = {
-                                        'contract': contract_address,
-                                        'symbol': token_metadata.get('symbol', 'UNKNOWN'),
-                                        'name': token_metadata.get('name', 'Unknown Token'),
-                                        'balance': actual_balance,
-                                        'decimals': decimals
-                                    }
-                                    
-                                    # Get ETH value
-                                    eth_value = await self._get_token_eth_value(token_data)
-                                    token_data['eth_value'] = eth_value
-                                    
-                                    # Add to results
-                                    balance_data['tokens'].append(token_data)
-                                    logger.info(f"Found {token_data['symbol']}: {actual_balance:.6f} (~{eth_value:.6f} ETH)")
-                                    
-                                except Exception as e:
-                                    logger.debug(f"Error processing token {contract_address}: {e}")
-                                    continue
-                        else:
-                            raise Exception("Invalid response format from Alchemy API")
-                    else:
-                        raise Exception(f"Alchemy API returned status {response.status}")
-                        
+            if not token_balances_response or not hasattr(token_balances_response, 'token_balances'):
+                raise Exception("Invalid response from Alchemy SDK")
+            
+            token_balances = token_balances_response.token_balances
+            logger.info(f"Alchemy SDK discovered {len(token_balances)} token contracts")
+            
+            # Process each token found by Alchemy
+            for token_balance in token_balances:
+                try:
+                    contract_address = token_balance.contract_address
+                    balance_hex = token_balance.token_balance
+                    
+                    # Skip if balance is 0 or null
+                    if not balance_hex or balance_hex in ["0x0", "0x", "0x00"]:
+                        continue
+                    
+                    # Convert hex balance to decimal
+                    try:
+                        balance_wei = int(balance_hex, 16)
+                        if balance_wei == 0:
+                            continue
+                    except ValueError:
+                        logger.debug(f"Invalid balance hex for {contract_address}: {balance_hex}")
+                        continue
+                    
+                    # Get token metadata using Alchemy SDK
+                    token_metadata = await asyncio.to_thread(
+                        self.alchemy.core.get_token_metadata,
+                        contract_address
+                    )
+                    
+                    if not token_metadata:
+                        continue
+                    
+                    # Calculate actual balance using decimals
+                    decimals = getattr(token_metadata, 'decimals', 18) or 18
+                    actual_balance = balance_wei / (10 ** decimals)
+                    
+                    if actual_balance <= 0:
+                        continue
+                    
+                    # Create token data structure
+                    token_data = {
+                        'contract': contract_address,
+                        'symbol': getattr(token_metadata, 'symbol', 'UNKNOWN') or 'UNKNOWN',
+                        'name': getattr(token_metadata, 'name', 'Unknown Token') or 'Unknown Token',
+                        'balance': actual_balance,
+                        'decimals': decimals
+                    }
+                    
+                    # Get ETH value
+                    eth_value = await self._get_token_eth_value(token_data)
+                    token_data['eth_value'] = eth_value
+                    
+                    # Add to results
+                    balance_data['tokens'].append(token_data)
+                    logger.info(f"Found {token_data['symbol']}: {actual_balance:.6f} (~{eth_value:.6f} ETH)")
+                    
+                except Exception as e:
+                    logger.debug(f"Error processing token {contract_address}: {e}")
+                    continue
+                    
         except Exception as e:
-            logger.error(f"Alchemy token scan failed: {e}")
+            logger.error(f"Alchemy SDK token scan failed: {e}")
             raise
     
-    async def _get_alchemy_token_metadata(self, session, api_key: str, contract_address: str) -> Dict:
-        """Get token metadata using Alchemy's getTokenMetadata method"""
-        try:
-            url = f"https://eth-mainnet.g.alchemy.com/v2/{api_key}"
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "alchemy_getTokenMetadata",
-                "params": [contract_address],
-                "id": 43
-            }
-            
-            async with session.post(url, json=payload, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    if "result" in data and data["result"]:
-                        return data["result"]
-                return None
-        except Exception as e:
-            logger.debug(f"Error getting token metadata for {contract_address}: {e}")
-            return None
     
 
     async def _get_token_eth_value(self, token_data: Dict) -> float:
