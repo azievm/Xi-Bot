@@ -103,9 +103,14 @@ That's it! Your bot is now running and ready to monitor wallets.
 | Command | Description | Example |
 |---------|-------------|---------|
 | `/start` | Show welcome message and instructions | `/start` |
+| `/menu` | Display interactive menu with buttons | `/menu` |
 | `/add_wallet <address> <name>` | Add a wallet to monitor | `/add_wallet 0x742d35Cc... MyWallet` |
 | `/remove_wallet <address>` | Remove a wallet from monitoring | `/remove_wallet 0x742d35Cc...` |
 | `/list_wallets` | Show all your monitored wallets | `/list_wallets` |
+| `/get_balance <address>` | Get comprehensive wallet balance | `/get_balance 0x742d35Cc...` |
+| `/get_balance <address> <token>` | Get specific token balance | `/get_balance 0x742d35Cc... 0xdAC17F958...` |
+| `/check_transactions` | Manually check for new transactions | `/check_transactions` |
+| `/test` | Test Web3 connection status | `/test` |
 
 ### Example Workflow
 
@@ -129,18 +134,19 @@ Hash: 0xabc123...
 Block: 18850123
 ```
 
-**Token Transaction:**
+**Balance Check Results:**
 ```
-🪙📥 Token Transaction - MyWallet
+💰 Balance Summary
 
-Type: Received USDC
-Amount: 1000.0 USDC
-Contract: 0xA0b86a33E6441e6079beB2e88B1eA0A3e9D99E9D
-From: 0x8ba1f109551bD432803012645Hac136c35a96BC6
-To: 0x742d35Cc6634C0532925a3b8D17319244F6C7F9c
-Time: 2024-01-15 14:32:45 UTC
-Hash: 0xdef456...
-Block: 18850125
+ETH: 2.450000 ETH
+Tokens: 5 types
+Token Value: 0.850000 ETH
+🎯 Total Portfolio: 3.300000 ETH
+
+Top Tokens:
+• USDT: ~0.500000 ETH
+• LINK: ~0.200000 ETH
+• UNI: ~0.150000 ETH
 ```
 
 
@@ -162,9 +168,50 @@ Xi-Bot/
 
 ## 🔧 Technical Details
 
+### Core Components
+
+The Xi Bot is built with three main classes that handle different aspects of the system:
+
+#### DatabaseManager Class
+Handles all SQLite database operations for persistent storage:
+- **`init_database()`** - Creates the wallets table with proper schema and constraints
+- **`add_wallet()`** - Adds a new wallet address for a user with custom naming
+- **`remove_wallet()`** - Removes a wallet from monitoring for a specific user
+- **`get_user_wallets()`** - Retrieves all wallets belonging to a specific user
+- **`get_all_wallets()`** - Gets all wallets mapped to user IDs for system-wide monitoring
+- **`get_wallet_name()`** - Fetches the custom name assigned to a wallet
+
+#### TransactionMonitor Class
+Manages all Ethereum blockchain interactions and monitoring:
+- **`__init__()`** - Initializes Web3 connection and Alchemy SDK integration
+- **`is_valid_address()`** - Validates Ethereum address format
+- **`format_address()`** - Converts addresses to checksum format for consistency
+- **`get_address_balance()`** - Retrieves comprehensive balance data including ETH and ERC-20 tokens
+- **`_get_token_balance()`** - Gets balance for a specific ERC-20 token contract
+- **`_scan_popular_tokens()`** - Scans wallet for balances of popular tokens (USDT, USDC, etc.)
+- **`_scan_tokens_via_alchemy()`** - Uses Alchemy SDK for enhanced token discovery
+- **`_get_token_eth_value()`** - Calculates token values in ETH using market data
+- **`get_new_transactions()`** - Monitors blockchain for new transactions on watched wallets
+- **`_process_eth_transaction()`** - Processes and formats ETH transaction data
+
+#### XiBot Class
+Main Telegram bot interface and orchestration:
+- **`setup_handlers()`** - Configures all Telegram command and callback handlers
+- **`start_command()`** - Handles /start command with welcome message and menu
+- **`menu_command()`** - Displays interactive menu with action buttons
+- **`button_callback()`** - Processes all inline keyboard button interactions
+- **`add_wallet_command()`** - Processes /add_wallet command with validation
+- **`remove_wallet_command()`** - Handles wallet removal requests
+- **`list_wallets_command()`** - Shows user's monitored wallets
+- **`get_balance_command()`** - Retrieves and displays comprehensive wallet balances
+- **`check_transactions_command()`** - Manually checks for new transactions
+- **`send_transaction_notification()`** - Sends formatted transaction alerts to users
+- **`monitor_transactions()`** - Main monitoring loop that runs continuously
+- **`start()`** - Initializes and starts the bot with monitoring
+
 ### Database Schema
 
-The bot uses SQLite with a simple schema:
+The bot uses SQLite with a simple but effective schema:
 
 ```sql
 CREATE TABLE wallets (
@@ -177,23 +224,34 @@ CREATE TABLE wallets (
 );
 ```
 
+### Balance Checking Features
+
+The bot provides comprehensive balance checking with:
+- **ETH Balance**: Native Ethereum balance in ETH units
+- **Token Discovery**: Automatic detection of ERC-20 tokens using popular token lists
+- **Enhanced Scanning**: Alchemy SDK integration for discovering all tokens in a wallet
+- **Value Calculation**: Token values calculated in ETH equivalent using CoinGecko API
+- **Portfolio Summary**: Total portfolio value combining ETH and token holdings
+- **Sorted Display**: Tokens sorted by value (highest first) for better user experience
+
 ### Transaction Detection
 
 - **ETH Transactions**: Detected by monitoring transaction `from` and `to` fields in each block
 - **ERC-20 Tokens**: Detected via `Transfer` event logs with signature `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`
-- **ERC-721 NFTs**: Same `Transfer` event signature as ERC-20 but with token ID
-- **ERC-1155 NFTs**: Detected via `TransferSingle` and `TransferBatch` events
+- **Real-time Monitoring**: Continuous blockchain scanning every 10 seconds
+- **Multi-user Support**: Each user's wallets are tracked independently
 
 ### Monitoring Algorithm
 
-1. Get current block number
+1. Get current block number from Ethereum network
 2. Check all blocks since last processed block
 3. For each block:
    - Scan all transactions for monitored wallet addresses
-   - Query event logs for Transfer events involving monitored wallets
-4. Process and format notifications
-5. Send to relevant Telegram users
-6. Update last processed block
+   - Process ETH transfers (incoming/outgoing)
+   - Extract transaction metadata (amount, gas, timestamp)
+4. Format and send notifications to relevant users
+5. Update last processed block number
+6. Repeat cycle every 10 seconds
 
 ## 🛠️ Development
 

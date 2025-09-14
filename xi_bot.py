@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
 Xi Bot - Telegram bot for tracking Ethereum wallet activity
-Monitors ETH and ERC-20 token transactions on user wallets
+
+This bot allows users to:
+- Monitor Ethereum wallet addresses for incoming/outgoing transactions
+- Check comprehensive wallet balances including ETH and ERC-20 tokens
+- Receive real-time notifications via Telegram when transactions occur
+- Track token values in ETH equivalent using market data
+- Manage multiple wallets with custom names for easy identification
+
+The bot uses Web3 to interact with the Ethereum blockchain and supports
+both basic RPC providers and enhanced services like Alchemy for better
+token discovery and metadata retrieval.
 """
 
 import asyncio
@@ -31,17 +41,23 @@ except ImportError:
     Network = None
     AlchemySettings = None
 
-# Configure logging
+# Configure logging system for debugging and monitoring
+# This sets up structured logging with timestamps and log levels
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ERC-20 Transfer event signature
+# ERC-20 Transfer event signature - used to identify token transfer events on the blockchain
+# This is the keccak256 hash of "Transfer(address,address,uint256)" event signature
 ERC20_TRANSFER_SIGNATURE = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
-# ERC-20 ABI for balanceOf, symbol, and decimals
+# ERC-20 Application Binary Interface (ABI) definitions
+# These define the standard functions we need to interact with ERC-20 tokens:
+# - balanceOf: get token balance for an address
+# - symbol: get token symbol (e.g., "USDT", "LINK")
+# - decimals: get number of decimal places for the token
 ERC20_ABI = [
     {
         "constant": True,
@@ -68,14 +84,29 @@ ERC20_ABI = [
 
 
 class DatabaseManager:
-    """Handles SQLite database operations for wallet storage"""
+    """
+    Handles SQLite database operations for wallet storage
+    
+    This class manages the persistent storage of user wallet addresses
+    and their associated names. It provides methods to:
+    - Add new wallets for users
+    - Remove wallets from monitoring
+    - Retrieve user's wallet lists
+    - Get all wallets for system-wide monitoring
+    """
 
     def __init__(self, db_path: str = "xi_bot.db"):
         self.db_path = db_path
         self.init_database()
 
     def init_database(self):
-        """Initialize the database with wallets table"""
+        """
+        Initialize the database with wallets table
+        
+        Creates the SQLite database and wallets table if they don't exist.
+        The table stores user_id, wallet_address, custom name, and creation timestamp.
+        Uses UNIQUE constraint to prevent duplicate wallet entries per user.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -94,7 +125,17 @@ class DatabaseManager:
         conn.close()
 
     def add_wallet(self, user_id: int, wallet_address: str, name_address: str) -> bool:
-        """Add a wallet for a user"""
+        """
+        Add a wallet for a user
+        
+        Args:
+            user_id: Telegram user ID
+            wallet_address: Ethereum wallet address (will be normalized to lowercase)
+            name_address: Custom name for the wallet (e.g., "My Main Wallet")
+            
+        Returns:
+            bool: True if wallet was added successfully, False if it already exists
+        """
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
@@ -111,7 +152,16 @@ class DatabaseManager:
             return False
 
     def remove_wallet(self, user_id: int, wallet_address: str) -> bool:
-        """Remove a wallet for a user"""
+        """
+        Remove a wallet for a user
+        
+        Args:
+            user_id: Telegram user ID
+            wallet_address: Ethereum wallet address to remove
+            
+        Returns:
+            bool: True if wallet was removed, False if wallet wasn't found
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -127,7 +177,15 @@ class DatabaseManager:
         return affected_rows > 0
 
     def get_user_wallets(self, user_id: int) -> List[Dict]:
-        """Get all wallets for a specific user"""
+        """
+        Get all wallets for a specific user
+        
+        Args:
+            user_id: Telegram user ID
+            
+        Returns:
+            List[Dict]: List of wallet dictionaries with 'address' and 'name' keys
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -147,7 +205,16 @@ class DatabaseManager:
         return wallets
 
     def get_all_wallets(self) -> Dict[str, List[int]]:
-        """Get all wallets mapped to user IDs for monitoring"""
+        """
+        Get all wallets mapped to user IDs for monitoring
+        
+        This method is used by the monitoring system to get all wallet addresses
+        that need to be watched, along with the user IDs that should be notified
+        when transactions occur on those wallets.
+        
+        Returns:
+            Dict[str, List[int]]: Dictionary mapping wallet addresses to lists of user IDs
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -166,7 +233,16 @@ class DatabaseManager:
         return wallet_users
 
     def get_wallet_name(self, user_id: int, wallet_address: str) -> Optional[str]:
-        """Get wallet name for a specific user and wallet"""
+        """
+        Get wallet name for a specific user and wallet
+        
+        Args:
+            user_id: Telegram user ID
+            wallet_address: Ethereum wallet address
+            
+        Returns:
+            Optional[str]: Custom wallet name if found, None otherwise
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -182,20 +258,40 @@ class DatabaseManager:
 
 
 class TransactionMonitor:
-    """Monitors Ethereum blockchain for new transactions and balance queries"""
+    """
+    Monitors Ethereum blockchain for new transactions and balance queries
+    
+    This class handles all blockchain interactions including:
+    - Connecting to Ethereum nodes via Web3 providers
+    - Monitoring blocks for new transactions
+    - Retrieving wallet balances (ETH and ERC-20 tokens)
+    - Token discovery using popular token lists and Alchemy SDK
+    - Price data integration for token valuation in ETH
+    """
 
     def __init__(self, web3_provider_url: str):
-        """Initialize the transaction monitor"""
+        """
+        Initialize the transaction monitor
+        
+        Sets up Web3 connection, initializes Alchemy SDK if available,
+        and establishes the starting block for transaction monitoring.
+        
+        Args:
+            web3_provider_url: Ethereum node URL (e.g., Alchemy, Infura, QuickNode)
+        """
         self.web3 = Web3(Web3.HTTPProvider(web3_provider_url))
-        # Start from recent blocks instead of genesis
+        # Start monitoring from recent blocks instead of genesis to avoid processing old data
+        # This improves startup time and focuses on current activity
         current_block = self.web3.eth.block_number
         self.last_checked_block = max(0, current_block - 100)  # Start from last 100 blocks
         
-        # Initialize Alchemy SDK if available
+        # Initialize Alchemy SDK if available for enhanced token discovery
+        # Alchemy provides better token metadata and balance discovery than basic Web3
         self.alchemy = None
         if Alchemy and "alchemy.com" in web3_provider_url:
             try:
-                # Extract API key from URL
+                # Extract API key from Alchemy URL format
+                # Alchemy URLs typically end with the API key after /v2/
                 api_key = web3_provider_url.split("/v2/")[-1] if "/v2/" in web3_provider_url else None
                 if api_key:
                     settings = AlchemySettings(
@@ -208,33 +304,68 @@ class TransactionMonitor:
             except Exception as e:
                 logger.warning(f"Failed to initialize Alchemy SDK: {e}")
         
-        # Test connection
+        # Test the Web3 connection to ensure we can communicate with the Ethereum network
         if not self.web3.is_connected():
             raise Exception(f"Failed to connect to Ethereum node at {web3_provider_url}")
         
         logger.info(f"Connected to Ethereum network. Latest block: {self.web3.eth.block_number}")
 
     def is_valid_address(self, address: str) -> bool:
-        """Check if an Ethereum address is valid"""
+        """
+        Check if an Ethereum address is valid
+        
+        Validates that the provided string is a properly formatted Ethereum address.
+        
+        Args:
+            address: String to validate as Ethereum address
+            
+        Returns:
+            bool: True if valid Ethereum address, False otherwise
+        """
         try:
             return Web3.is_address(address)
         except:
             return False
 
     def format_address(self, address: str) -> str:
-        """Format address to checksum format"""
+        """
+        Format address to checksum format
+        
+        Converts an Ethereum address to the standard checksum format
+        which uses mixed case to provide error detection.
+        
+        Args:
+            address: Ethereum address string
+            
+        Returns:
+            str: Checksummed address or cleaned lowercase address if checksum fails
+        """
         try:
-            # Убираем любые пробелы и приводим к нижнему регистру
+            # Remove any whitespace and convert to lowercase for processing
             clean_address = address.strip().lower()
             return Web3.to_checksum_address(clean_address)
         except:
-            # Если checksum не работает, возвращаем оригинальный адрес
+            # If checksum conversion fails, return cleaned lowercase address
             return address.strip().lower()
 
     async def get_address_balance(self, address: str, token_contract_address: Optional[str] = None, scan_all_tokens: bool = False) -> Dict:
-        """Get balance information for an Ethereum address"""
+        """
+        Get comprehensive balance information for an Ethereum address
+        
+        This method retrieves ETH balance and optionally scans for ERC-20 tokens.
+        It can either check a specific token or scan for all popular tokens.
+        Token values are calculated in ETH equivalent using market data.
+        
+        Args:
+            address: Ethereum wallet address to check
+            token_contract_address: Specific ERC-20 token contract to check (optional)
+            scan_all_tokens: Whether to scan for all popular tokens (default: False)
+            
+        Returns:
+            Dict: Balance data including ETH balance, token list, and portfolio summary
+        """
         try:
-            # Проверяем подключение
+            # Check Web3 connection status before proceeding
             if not self.web3.is_connected():
                 logger.error("Web3 connection lost")
                 return {'error': 'Web3 connection lost'}
@@ -251,12 +382,12 @@ class TransactionMonitor:
                 'error': None
             }
 
-            # Получаем баланс ETH
+            # Get ETH balance from the blockchain
             try:
                 eth_balance_wei = self.web3.eth.get_balance(address)
                 logger.info(f"Raw ETH balance in wei: {eth_balance_wei}")
                 
-                # Преобразование из wei в ETH
+                # Convert from wei (smallest ETH unit) to ETH
                 eth_balance = self.web3.from_wei(eth_balance_wei, 'ether')
                 logger.info(f"Converted ETH balance: {eth_balance}")
                 
@@ -269,9 +400,9 @@ class TransactionMonitor:
                 balance_data['error'] = error_msg
                 return balance_data
 
-            # Получаем балансы токенов
+            # Get token balances based on the request type
             if token_contract_address:
-                # Получаем баланс конкретного токена
+                # Get balance for a specific token contract
                 try:
                     token_balance = await self._get_token_balance(address, token_contract_address)
                     if token_balance:
@@ -279,24 +410,24 @@ class TransactionMonitor:
                 except Exception as e:
                     logger.error(f"Error getting token balance: {e}")
             elif scan_all_tokens:
-                # Use Alchemy's native token discovery first
+                # Use Alchemy's enhanced token discovery for comprehensive scanning
                 try:
                     await self._scan_tokens_via_alchemy(address, balance_data)
                     logger.info(f"Alchemy scan completed, found {len(balance_data['tokens'])} tokens")
                 except Exception as e:
                     logger.warning(f"Alchemy scan failed: {e}")
-                    # Fallback to popular tokens scan
+                    # Fallback to scanning popular tokens if Alchemy fails
                     await self._scan_popular_tokens(address, balance_data)
             
-            # Calculate token statistics
+            # Calculate portfolio statistics and token metrics
             balance_data['token_count'] = len(balance_data['tokens'])
             
-            # Calculate total portfolio value in ETH
+            # Calculate total portfolio value in ETH equivalent
             total_token_eth_value = sum(token.get('eth_value', 0) for token in balance_data['tokens'])
             balance_data['total_token_eth_value'] = total_token_eth_value
             balance_data['total_portfolio_eth'] = balance_data['eth_balance'] + total_token_eth_value
             
-            # Sort tokens by ETH value (highest first)
+            # Sort tokens by ETH value (highest first) for better display
             balance_data['tokens'].sort(key=lambda x: x.get('eth_value', 0), reverse=True)
             
             logger.info(f"Portfolio summary: {balance_data['eth_balance']:.6f} ETH + {total_token_eth_value:.6f} ETH in tokens = {balance_data['total_portfolio_eth']:.6f} ETH total")
