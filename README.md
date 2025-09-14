@@ -354,30 +354,3 @@ For high-volume monitoring:
 5. Push to the branch: `git push origin feature-name`
 6. Submit a pull request
 
-### Development Guidelines
-
-- Follow PEP 8 style guide
-- Add docstrings to all functions and classes
-- Include unit tests for new features
-- Update documentation for API changes
-- Use type hints where appropriate
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🙏 Acknowledgments
-
-- [python-telegram-bot](https://python-telegram-bot.org/) - Telegram Bot API wrapper
-- [web3.py](https://web3py.readthedocs.io/) - Ethereum blockchain interaction
-- [Alchemy](https://alchemy.com/) - Recommended Ethereum node provider
-
-## 📞 Support
-
-- 📧 Email: support@xibot.com
-- 💬 Telegram: [@XiBotSupport](https://t.me/XiBotSupport)
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/Xi-Bot/issues)
-
----
-
-**⚠️ Disclaimer:** This bot monitors public blockchain data. Never share your private keys or sensitive information. The bot only tracks wallet addresses, not private keys or wallet access.
